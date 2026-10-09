@@ -1,0 +1,21 @@
+name: Verify independent service
+on: [push, pull_request, workflow_dispatch]
+jobs:
+  verify:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with: {path: service}
+      - uses: actions/checkout@v4
+        with:
+          repository: Veltis-Software/coldtrace-shared
+          ref: 08ab5ee5321e3d7e5e4ec0b3c454a5f5da9bfcc3
+          path: shared
+      - uses: actions/setup-java@v4
+        with: {distribution: temurin, java-version: '21', cache: maven, cache-dependency-path: '**/pom.xml'}
+      - run: mvn -B -f shared/pom.xml install
+      - run: mvn -B -f service/pom.xml verify
+      - run: docker build --build-context shared=./shared -t coldtrace-monitoring-service:ci ./service
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with: {name: test-results, path: service/target/surefire-reports}
