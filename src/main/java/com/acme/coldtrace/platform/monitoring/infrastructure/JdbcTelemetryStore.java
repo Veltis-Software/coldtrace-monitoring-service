@@ -159,6 +159,49 @@ public class JdbcTelemetryStore implements TelemetryStore {
     return Objects.requireNonNull(holder.getKey()).longValue();
   }
 
+  public Map<String, Object> assetContext(long assetId, long organizationId) {
+    var rows =
+        jdbc.queryForList(
+            "SELECT name,location_name FROM asset_replica WHERE asset_id=? AND organization_id=?",
+            assetId,
+            organizationId);
+    var context = new LinkedHashMap<String, Object>();
+    if (!rows.isEmpty()) {
+      context.put("assetName", rows.get(0).get("name"));
+      context.put("locationName", rows.get(0).get("location_name"));
+    }
+    return context;
+  }
+
+  public boolean thresholdDue(
+      Device device, Reading reading, boolean breached, int toleranceMinutes) {
+    var rows =
+        jdbc.queryForList(
+            "SELECT * FROM threshold_windows WHERE iot_device_id=? FOR UPDATE", device.id());
+    if (!rows.isEmpty()
+        && reading.recordedAt().isBefore(SqlTimes.instant(rows.get(0).get("last_evaluated_at"))))
+      return false;
+    Instant first = rows.isEmpty() ? null : SqlTimes.instant(rows.get(0).get("first_breached_at"));
+    boolean notified = !rows.isEmpty() && Boolean.TRUE.equals(rows.get(0).get("notified"));
+    if (!breached) {
+      first = null;
+      notified = false;
+    } else if (first == null) first = reading.recordedAt();
+    boolean due =
+        breached
+            && !notified
+            && !reading.recordedAt().isBefore(first.plusSeconds(toleranceMinutes * 60L));
+    jdbc.update(
+        "INSERT INTO threshold_windows(iot_device_id,first_breached_at,last_evaluated_at,notified)"
+            + " VALUES (?,?,?,?) ON DUPLICATE KEY UPDATE"
+            + " first_breached_at=VALUES(first_breached_at),last_evaluated_at=VALUES(last_evaluated_at),notified=VALUES(notified)",
+        device.id(),
+        first == null ? null : ts(first),
+        ts(reading.recordedAt()),
+        notified || due);
+    return due;
+  }
+
   public void project(
       Device d, Reading r, long id, boolean breached, Instant now, String correlation) {
     var states =

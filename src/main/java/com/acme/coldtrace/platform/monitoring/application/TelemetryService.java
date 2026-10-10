@@ -94,6 +94,7 @@ public class TelemetryService {
       store.project(d, r, id, breached, now, correlation);
       accepted++;
       var payload = new LinkedHashMap<String, Object>();
+      payload.putAll(store.assetContext(d.assetId(), d.organizationId()));
       payload.put("readingId", id);
       payload.put("assetId", d.assetId());
       payload.put("iotDeviceId", d.id());
@@ -101,10 +102,14 @@ public class TelemetryService {
       payload.put("temperature", r.temperature());
       payload.put("humidity", r.humidity());
       payload.put("outOfRange", breached);
+      payload.put("safeMinTemperature", range.minimumTemperature());
+      payload.put("safeMaxTemperature", range.maximumTemperature());
+      payload.put("safeMinHumidity", range.minimumHumidity());
+      payload.put("safeMaxHumidity", range.maximumHumidity());
       ingested.add(payload);
-      if (breached) {
+      if (store.thresholdDue(d, r, breached, range.toleranceMinutes())) {
         var threshold = new LinkedHashMap<>(payload);
-        threshold.put("severity", "WARNING");
+        threshold.put("severity", "CRITICAL");
         threshold.put("safeMinTemperature", range.minimumTemperature());
         threshold.put("safeMaxTemperature", range.maximumTemperature());
         threshold.put("safeMinHumidity", range.minimumHumidity());
