@@ -43,18 +43,17 @@ authenticated cloud publication is not yet implemented.
 
 ## Build and test
 
-Requires Java 21 and Maven. Install the shared library from tag
-`v0.1.0-sprint1` (`08ab5ee5321e3d7e5e4ec0b3c454a5f5da9bfcc3`) first:
+Requires Java 21 and Maven. Install the common library from the infrastructure repository first:
 
 ```sh
-mvn -B -f ../coldtrace-shared/pom.xml install
+mvn -B -f ../coldtrace-infrastructure/libraries/coldtrace-shared/pom.xml install
 mvn -B verify
 ```
 
 Build the standalone image with the sibling library as a named build context:
 
 ```sh
-docker build --build-context shared=../coldtrace-shared -t coldtrace-monitoring-service:dev .
+docker build --build-context shared=../coldtrace-infrastructure/libraries/coldtrace-shared -t coldtrace-monitoring-service:dev .
 ```
 
 The CI workflow installs the pinned shared source, runs tests, builds the image

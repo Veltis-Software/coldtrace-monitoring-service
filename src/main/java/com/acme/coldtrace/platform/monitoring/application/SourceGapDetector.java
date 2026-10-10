@@ -46,6 +46,7 @@ public class SourceGapDetector {
       for (var column : new String[] {"last_heartbeat_at", "last_recorded_at"}) {
         var value =
             com.acme.coldtrace.platform.monitoring.infrastructure.SqlTimes.instant(d.get(column));
+        if (value != null && value.isAfter(now)) value = now;
         if (value != null && value.isAfter(seen)) seen = value;
       }
       if (!Telemetry.gap(now, seen, ((Number) d.get("reading_frequency_seconds")).intValue())

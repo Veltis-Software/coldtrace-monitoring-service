@@ -32,6 +32,8 @@ public class TelemetryIntegrationTest {
   public static final Instant NOW = Instant.parse("2026-10-09T20:00:00Z");
   @Autowired TelemetryService service;
   @Autowired SourceGapDetector gaps;
+  @Autowired SettingsConsumer settings;
+  @Autowired com.fasterxml.jackson.databind.ObjectMapper json;
   @Autowired JdbcTemplate jdbc;
   @Autowired PasswordEncoder passwords;
   @Autowired MockMvc mvc;
@@ -45,6 +47,9 @@ public class TelemetryIntegrationTest {
     when(identity.organization("Bearer org-2")).thenReturn(2L);
     for (String table :
         List.of(
+            "asset_replica",
+            "threshold_windows",
+            "processed_events",
             "telemetry_batches",
             "outbox_events",
             "asset_current_state",
@@ -67,7 +72,7 @@ public class TelemetryIntegrationTest {
     jdbc.update(
         "INSERT INTO"
             + " safe_range_replica(asset_id,organization_id,minimum_temperature,maximum_temperature,minimum_humidity,maximum_humidity,alert_threshold_minutes,settings_version,updated_at)"
-            + " VALUES (1,1,2,8,40,80,5,1,?)",
+            + " VALUES (1,1,2,8,40,80,0,1,?)",
         Timestamp.from(NOW));
   }
 
@@ -292,5 +297,125 @@ public class TelemetryIntegrationTest {
         .isTrue();
     assertThat(doc.at("/components/schemas/AssetCurrentState/properties").has("safeRange"))
         .isTrue();
+  }
+
+  @Test
+  void toleranceRequiresSustainedDeviationAndResetsAfterNormalReading() {
+    jdbc.update("UPDATE safe_range_replica SET alert_threshold_minutes=1");
+    service.ingest(
+        GATEWAY,
+        UUID.randomUUID(),
+        "local-key",
+        List.of(reading(1, NOW.minusSeconds(120), 12)),
+        "tolerance");
+    assertThat(
+            jdbc.queryForObject(
+                "SELECT COUNT(*) FROM outbox_events WHERE event_type='threshold.breached'",
+                Long.class))
+        .isZero();
+    service.ingest(
+        GATEWAY,
+        UUID.randomUUID(),
+        "local-key",
+        List.of(reading(2, NOW.minusSeconds(61), 12)),
+        "tolerance");
+    assertThat(
+            jdbc.queryForObject(
+                "SELECT COUNT(*) FROM outbox_events WHERE event_type='threshold.breached'",
+                Long.class))
+        .isZero();
+    service.ingest(
+        GATEWAY,
+        UUID.randomUUID(),
+        "local-key",
+        List.of(reading(3, NOW.minusSeconds(60), 12), reading(4, NOW.minusSeconds(50), 13)),
+        "tolerance");
+    assertThat(
+            jdbc.queryForObject(
+                "SELECT COUNT(*) FROM outbox_events WHERE event_type='threshold.breached'",
+                Long.class))
+        .isEqualTo(1);
+    service.ingest(
+        GATEWAY,
+        UUID.randomUUID(),
+        "local-key",
+        List.of(reading(5, NOW.minusSeconds(40), 6), reading(6, NOW.minusSeconds(30), 12)),
+        "tolerance");
+    assertThat(
+            jdbc.queryForObject(
+                "SELECT COUNT(*) FROM outbox_events WHERE event_type='threshold.breached'",
+                Long.class))
+        .isEqualTo(1);
+  }
+
+  @Test
+  void settingsReplicaRejectsOldVersionsAndResetsToleranceOnlyForNewRules() {
+    service.ingest(GATEWAY, UUID.randomUUID(), "local-key", List.of(reading(1, NOW, 12)), "test");
+    var payload = new HashMap<String, Object>();
+    payload.put("assetId", 1);
+    payload.put("settingsVersion", 2);
+    payload.put("minimumTemperature", 1);
+    payload.put("maximumTemperature", 7);
+    payload.put("alertThresholdMinutes", 5);
+    var envelope =
+        json.valueToTree(
+            Map.of(
+                "eventId",
+                UUID.randomUUID(),
+                "eventType",
+                "asset.settings-changed",
+                "version",
+                1,
+                "organizationId",
+                1,
+                "payload",
+                payload));
+    settings.accept(envelope);
+    settings.accept(envelope);
+    assertThat(
+            jdbc.queryForObject(
+                "SELECT maximum_temperature FROM safe_range_replica WHERE asset_id=1",
+                Double.class))
+        .isEqualTo(7);
+    assertThat(jdbc.queryForObject("SELECT COUNT(*) FROM threshold_windows", Long.class)).isZero();
+    payload.put("settingsVersion", 1);
+    payload.put("maximumTemperature", 99);
+    settings.accept(
+        json.valueToTree(
+            Map.of(
+                "eventId",
+                UUID.randomUUID(),
+                "eventType",
+                "asset.settings-changed",
+                "version",
+                1,
+                "organizationId",
+                1,
+                "payload",
+                payload)));
+    assertThat(
+            jdbc.queryForObject(
+                "SELECT maximum_temperature FROM safe_range_replica WHERE asset_id=1",
+                Double.class))
+        .isEqualTo(7);
+    payload.put("settingsVersion", 3);
+    assertThatThrownBy(
+            () ->
+                settings.accept(
+                    json.valueToTree(
+                        Map.of(
+                            "eventId",
+                            UUID.randomUUID(),
+                            "eventType",
+                            "asset.settings-changed",
+                            "version",
+                            1,
+                            "organizationId",
+                            2,
+                            "payload",
+                            payload))))
+        .isInstanceOf(IllegalArgumentException.class);
+    assertThat(jdbc.queryForObject("SELECT COUNT(*) FROM processed_events", Long.class))
+        .isEqualTo(2);
   }
 }
