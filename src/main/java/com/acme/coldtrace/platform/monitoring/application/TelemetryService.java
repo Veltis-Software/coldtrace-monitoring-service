@@ -44,6 +44,7 @@ public class TelemetryService {
     if (readings.size() > 500)
       throw new ResponseStatusException(HttpStatus.PAYLOAD_TOO_LARGE, "Maximum 500 readings");
     var devices = new ArrayList<Device>();
+    var sourceHistory = new HashMap<Long, List<SourceAssignment>>();
     Instant previous = Instant.MIN;
     for (var r : readings) {
       if (r == null
@@ -65,6 +66,23 @@ public class TelemetryService {
       var d = store.device(r.deviceUuid());
       if (d == null || d.gatewayId() != g.id() || d.organizationId() != g.organizationId())
         throw new ResponseStatusException(HttpStatus.BAD_REQUEST, "Device not owned by gateway");
+      // Historical retries and migration-era buffered readings keep their original meaning.
+      if (!store.exists(d, r)) {
+        var history = sourceHistory.computeIfAbsent(d.id(), ignored -> store.sourceAssignments(d));
+        if (!history.isEmpty() && !r.recordedAt().isBefore(history.getFirst().effectiveAt())) {
+          var effective = history.getFirst();
+          for (var assignment : history) {
+            if (assignment.effectiveAt().isAfter(r.recordedAt())) break;
+            effective = assignment;
+          }
+          if (!r.hasSourceContext()
+              || !effective.sourceId().equals(r.sourceId())
+              || effective.profileVersion() != r.profileVersion()) {
+            throw new ResponseStatusException(
+                HttpStatus.CONFLICT, "Reading source does not match its effective configuration");
+          }
+        }
+      }
       devices.add(d);
     }
     try {
