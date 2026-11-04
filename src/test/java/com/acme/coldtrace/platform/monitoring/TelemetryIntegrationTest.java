@@ -23,7 +23,7 @@ import org.springframework.test.context.ActiveProfiles;
 import org.springframework.test.web.servlet.MockMvc;
 import org.springframework.web.server.ResponseStatusException;
 
-@SpringBootTest
+@SpringBootTest(properties = "coldtrace.pubsub.local-push-enabled=true")
 @AutoConfigureMockMvc
 @ActiveProfiles("test")
 public class TelemetryIntegrationTest {
@@ -33,6 +33,7 @@ public class TelemetryIntegrationTest {
   @Autowired TelemetryService service;
   @Autowired SourceGapDetector gaps;
   @Autowired SettingsConsumer settings;
+  @Autowired SourceConfigurationConsumer sourceConfigurations;
   @Autowired com.fasterxml.jackson.databind.ObjectMapper json;
   @Autowired JdbcTemplate jdbc;
   @Autowired PasswordEncoder passwords;
@@ -47,6 +48,7 @@ public class TelemetryIntegrationTest {
     when(identity.organization("Bearer org-2")).thenReturn(2L);
     for (String table :
         List.of(
+            "source_assignment_revisions",
             "asset_replica",
             "threshold_windows",
             "processed_events",
@@ -78,6 +80,239 @@ public class TelemetryIntegrationTest {
 
   public Reading reading(long seq, Instant at, double temperature) {
     return new Reading(DEVICE, seq, at, temperature, 60.0, null, null);
+  }
+
+  com.fasterxml.jackson.databind.node.ObjectNode sourceConfiguration(
+      long version, String source, Instant at) {
+    return json.valueToTree(
+        Map.of(
+            "eventId",
+            UUID.randomUUID().toString(),
+            "eventType",
+            "source.configuration-changed",
+            "version",
+            1,
+            "organizationId",
+            1,
+            "payload",
+            Map.of(
+                "organizationId",
+                1,
+                "deviceId",
+                1,
+                "gatewayId",
+                1,
+                "assetId",
+                1,
+                "deviceUuid",
+                DEVICE.toString(),
+                "configurationVersion",
+                version,
+                "changedAt",
+                at.toString(),
+                "profile",
+                Map.of(
+                    "sourceId",
+                    source,
+                    "transport",
+                    "mqtt",
+                    "profileVersion",
+                    1,
+                    "schemaVersion",
+                    1,
+                    "temperatureUnit",
+                    "C",
+                    "humidityUnit",
+                    "%RH",
+                    "fields",
+                    Map.of(
+                        "temperature",
+                        "temperature",
+                        "humidity",
+                        "humidity",
+                        "recordedAt",
+                        "recordedAt")))));
+  }
+
+  Reading sourced(long sequence, Instant at, String source) {
+    return new Reading(DEVICE, sequence, at, 4.0, 60.0, null, null, source, 1, 1, "C", "%RH");
+  }
+
+  @Test
+  void localPushAdapterDispatchesSourceEventsIdempotently() throws Exception {
+    var event = sourceConfiguration(1, "probe-a", NOW.minusSeconds(30));
+    var push =
+        json.writeValueAsString(
+            Map.of(
+                "message",
+                Map.of("data", Base64.getEncoder().encodeToString(json.writeValueAsBytes(event)))));
+    for (int retry = 0; retry < 2; retry++) {
+      mvc.perform(post("/internal/pubsub/events").contentType("application/json").content(push))
+          .andExpect(status().isNoContent());
+    }
+    assertThat(jdbc.queryForObject("SELECT COUNT(*) FROM source_assignment_revisions", Long.class))
+        .isEqualTo(1);
+  }
+
+  @Test
+  void sourceReplacementAcceptsBufferedOldReadingsAndRejectsRetiredSourceAtomically() {
+    sourceConfigurations.accept(sourceConfiguration(1, "probe-a", NOW.minusSeconds(30)));
+    sourceConfigurations.accept(sourceConfiguration(2, "probe-b", NOW.minusSeconds(10)));
+    var result =
+        service.ingest(
+            GATEWAY,
+            UUID.randomUUID(),
+            "local-key",
+            List.of(sourced(1, NOW.minusSeconds(20), "probe-a"), sourced(2, NOW, "probe-b")),
+            "replacement");
+    assertThat(result.accepted()).isEqualTo(2);
+    long beforeEvents = jdbc.queryForObject("SELECT COUNT(*) FROM outbox_events", Long.class);
+    long beforeBatches = jdbc.queryForObject("SELECT COUNT(*) FROM telemetry_batches", Long.class);
+    assertThatThrownBy(
+            () ->
+                service.ingest(
+                    GATEWAY,
+                    UUID.randomUUID(),
+                    "local-key",
+                    List.of(sourced(3, NOW.minusSeconds(1), "probe-b"), sourced(4, NOW, "probe-a")),
+                    "retired"))
+        .isInstanceOf(ResponseStatusException.class)
+        .hasMessageContaining("effective configuration");
+    assertThat(jdbc.queryForObject("SELECT COUNT(*) FROM sensor_readings", Long.class))
+        .isEqualTo(2);
+    assertThat(jdbc.queryForObject("SELECT COUNT(*) FROM outbox_events", Long.class))
+        .isEqualTo(beforeEvents);
+    assertThat(jdbc.queryForObject("SELECT COUNT(*) FROM telemetry_batches", Long.class))
+        .isEqualTo(beforeBatches);
+  }
+
+  @Test
+  void sourceRevisionsDeduplicateAndRetryMissingPredecessors() {
+    var first = sourceConfiguration(1, "probe-a", NOW.minusSeconds(30));
+    var second = sourceConfiguration(2, "probe-b", NOW.minusSeconds(10));
+    assertThatThrownBy(() -> sourceConfigurations.accept(second))
+        .isInstanceOf(ResponseStatusException.class)
+        .hasMessageContaining("in order");
+    assertThat(jdbc.queryForObject("SELECT COUNT(*) FROM source_assignment_revisions", Long.class))
+        .isZero();
+    sourceConfigurations.accept(first);
+    sourceConfigurations.accept(second);
+    sourceConfigurations.accept(first);
+    assertThat(jdbc.queryForObject("SELECT COUNT(*) FROM source_assignment_revisions", Long.class))
+        .isEqualTo(2);
+    var altered = first.deepCopy();
+    ((com.fasterxml.jackson.databind.node.ObjectNode) altered.path("payload").path("profile"))
+        .put("sourceId", "tampered");
+    assertThatThrownBy(() -> sourceConfigurations.accept(altered))
+        .isInstanceOf(ResponseStatusException.class)
+        .hasMessageContaining("different content");
+  }
+
+  @Test
+  void sourceAssociationMustMatchProvisionedOwnership() {
+    for (String field :
+        List.of("organizationId", "assetId", "gatewayId", "deviceId", "deviceUuid")) {
+      var event = sourceConfiguration(1, "probe-a", NOW.minusSeconds(30));
+      var payload = (com.fasterxml.jackson.databind.node.ObjectNode) event.path("payload");
+      if (field.equals("deviceUuid")) payload.put(field, UUID.randomUUID().toString());
+      else payload.put(field, 2);
+      assertThatThrownBy(() -> sourceConfigurations.accept(event))
+          .isInstanceOf(ResponseStatusException.class);
+    }
+    assertThat(jdbc.queryForObject("SELECT COUNT(*) FROM source_assignment_revisions", Long.class))
+        .isZero();
+  }
+
+  @Test
+  void sourceEventsRejectInvalidVersionsMappingsAndTime() {
+    for (com.fasterxml.jackson.databind.JsonNode invalid :
+        List.<com.fasterxml.jackson.databind.JsonNode>of(
+            json.valueToTree(1.5), json.valueToTree("1"), json.valueToTree(true))) {
+      var event = sourceConfiguration(1, "probe-a", NOW.minusSeconds(30));
+      ((com.fasterxml.jackson.databind.node.ObjectNode) event.path("payload"))
+          .set("configurationVersion", invalid);
+      assertThatThrownBy(() -> sourceConfigurations.accept(event))
+          .isInstanceOf(ResponseStatusException.class);
+    }
+    var invalidTime = sourceConfiguration(1, "probe-a", NOW.minusSeconds(30));
+    ((com.fasterxml.jackson.databind.node.ObjectNode) invalidTime.path("payload"))
+        .put("changedAt", "not-a-time");
+    assertThatThrownBy(() -> sourceConfigurations.accept(invalidTime))
+        .isInstanceOf(ResponseStatusException.class);
+    var duplicateFields = sourceConfiguration(1, "probe-a", NOW.minusSeconds(30));
+    ((com.fasterxml.jackson.databind.node.ObjectNode)
+            duplicateFields.path("payload").path("profile").path("fields"))
+        .put("humidity", "temperature");
+    assertThatThrownBy(() -> sourceConfigurations.accept(duplicateFields))
+        .isInstanceOf(ResponseStatusException.class);
+    assertThat(jdbc.queryForObject("SELECT COUNT(*) FROM source_assignment_revisions", Long.class))
+        .isZero();
+  }
+
+  @Test
+  void managementActivationPreservesLegacyBufferButRequiresContextForNewReadings() {
+    sourceConfigurations.accept(sourceConfiguration(1, "probe-a", NOW.minusSeconds(10)));
+    assertThat(
+            service
+                .ingest(
+                    GATEWAY,
+                    UUID.randomUUID(),
+                    "local-key",
+                    List.of(reading(1, NOW.minusSeconds(20), 4.0)),
+                    "legacy-buffer")
+                .accepted())
+        .isEqualTo(1);
+    assertThatThrownBy(
+            () ->
+                service.ingest(
+                    GATEWAY,
+                    UUID.randomUUID(),
+                    "local-key",
+                    List.of(reading(2, NOW, 4.0)),
+                    "missing-source"))
+        .isInstanceOf(ResponseStatusException.class);
+    assertThat(jdbc.queryForObject("SELECT COUNT(*) FROM sensor_readings", Long.class))
+        .isEqualTo(1);
+  }
+
+  @Test
+  void replacementDoesNotBreakConfirmedReadingRetries() {
+    sourceConfigurations.accept(sourceConfiguration(1, "probe-a", NOW.minusSeconds(30)));
+    var pending = sourced(1, NOW.minusSeconds(20), "probe-a");
+    var batch = UUID.randomUUID();
+    service.ingest(GATEWAY, batch, "local-key", List.of(pending), "before-replacement");
+    sourceConfigurations.accept(sourceConfiguration(2, "probe-b", NOW.minusSeconds(10)));
+    var retry = service.ingest(GATEWAY, batch, "local-key", List.of(pending), "after-replacement");
+    assertThat(retry.accepted()).isZero();
+    assertThat(retry.duplicated()).isEqualTo(1);
+    assertThat(jdbc.queryForObject("SELECT COUNT(*) FROM sensor_readings", Long.class))
+        .isEqualTo(1);
+  }
+
+  @Test
+  void concurrentSourceEventRedeliveryAppliesOneRevision() throws Exception {
+    var event = sourceConfiguration(1, "probe-a", NOW.minusSeconds(30));
+    try (var executor = Executors.newFixedThreadPool(2)) {
+      var first = executor.submit(() -> sourceConfigurations.accept(event));
+      var second = executor.submit(() -> sourceConfigurations.accept(event));
+      first.get(10, TimeUnit.SECONDS);
+      second.get(10, TimeUnit.SECONDS);
+    }
+    assertThat(jdbc.queryForObject("SELECT COUNT(*) FROM source_assignment_revisions", Long.class))
+        .isEqualTo(1);
+  }
+
+  @Test
+  void sourceConfigurationTimeCannotMoveBackwards() {
+    sourceConfigurations.accept(sourceConfiguration(1, "probe-a", NOW.minusSeconds(10)));
+    assertThatThrownBy(
+            () ->
+                sourceConfigurations.accept(
+                    sourceConfiguration(2, "probe-b", NOW.minusSeconds(20))))
+        .isInstanceOf(ResponseStatusException.class)
+        .hasMessageContaining("backwards");
+    assertThat(jdbc.queryForObject("SELECT COUNT(*) FROM source_assignment_revisions", Long.class))
+        .isEqualTo(1);
   }
 
   Reading canonical(
