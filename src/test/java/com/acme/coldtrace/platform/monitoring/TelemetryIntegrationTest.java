@@ -209,6 +209,32 @@ public class TelemetryIntegrationTest {
   }
 
   @Test
+  void aLiveEventAfterHistoryBootstrapDoesNotDuplicateTheRevision() {
+    var bootstrap = sourceConfiguration(1, "probe-a", NOW.minusSeconds(30));
+    sourceConfigurations.accept(bootstrap);
+    var live = bootstrap.deepCopy();
+    ((com.fasterxml.jackson.databind.node.ObjectNode) live)
+        .put("eventId", UUID.randomUUID().toString());
+    sourceConfigurations.accept(live);
+    sourceConfigurations.accept(sourceConfiguration(2, "probe-b", NOW.minusSeconds(10)));
+    sourceConfigurations.accept(live);
+    assertThat(jdbc.queryForObject("SELECT COUNT(*) FROM source_assignment_revisions", Long.class))
+        .isEqualTo(2);
+  }
+
+  @Test
+  void aDifferentEventCannotOverwriteAnExistingConfigurationRevision() {
+    var first = sourceConfiguration(1, "probe-a", NOW.minusSeconds(30));
+    sourceConfigurations.accept(first);
+    var altered = sourceConfiguration(1, "probe-b", NOW.minusSeconds(30));
+    assertThatThrownBy(() -> sourceConfigurations.accept(altered))
+        .isInstanceOf(ResponseStatusException.class)
+        .hasMessageContaining("different content");
+    assertThat(jdbc.queryForObject("SELECT source_id FROM source_assignment_revisions", String.class))
+        .isEqualTo("probe-a");
+  }
+
+  @Test
   void sourceAssociationMustMatchProvisionedOwnership() {
     for (String field :
         List.of("organizationId", "assetId", "gatewayId", "deviceId", "deviceUuid")) {

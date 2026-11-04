@@ -1,6 +1,9 @@
 package com.acme.coldtrace.platform.monitoring.infrastructure;
 
 import com.acme.coldtrace.shared.IdentitySession;
+import com.acme.coldtrace.platform.monitoring.application.SourceConfigurationConsumer;
+import com.fasterxml.jackson.databind.JsonNode;
+import com.fasterxml.jackson.databind.ObjectMapper;
 import java.sql.Timestamp;
 import java.time.*;
 import java.util.*;
@@ -21,12 +24,16 @@ public class ReplicaProvisioning {
   private final JdbcTemplate jdbc;
   private final PasswordEncoder passwords;
   private final TransactionTemplate transaction;
+  private final SourceConfigurationConsumer sourceConfigurations;
+  private final ObjectMapper json;
 
   public ReplicaProvisioning(
       @Value("${coldtrace.asset.url:${coldtrace.identity.url}}") String url,
       JdbcTemplate jdbc,
       PasswordEncoder passwords,
-      PlatformTransactionManager manager) {
+      PlatformTransactionManager manager,
+      SourceConfigurationConsumer sourceConfigurations,
+      ObjectMapper json) {
     var factory =
         new org.springframework.http.client.JdkClientHttpRequestFactory(
             java.net.http.HttpClient.newBuilder().connectTimeout(Duration.ofSeconds(2)).build());
@@ -35,6 +42,8 @@ public class ReplicaProvisioning {
     this.jdbc = jdbc;
     this.passwords = passwords;
     transaction = new TransactionTemplate(manager);
+    this.sourceConfigurations = sourceConfigurations;
+    this.json = json;
   }
 
   public record Gateway(long id, long organizationId, long locationId, String uuid) {}
@@ -127,6 +136,15 @@ public class ReplicaProvisioning {
       snapshots.add(new Snapshot(device, asset, range, location == null ? null : location.name()));
     }
     final String hash = passwords.encode(key);
+    var history = new ArrayList<JsonNode>();
+    for (var snapshot : snapshots) {
+      var revisions = get(bearer,
+          "/api/v1/organizations/{org}/iot-devices/{device}/source-configuration/history",
+          JsonNode[].class, org, snapshot.device().id());
+      if (revisions != null) history.addAll(Arrays.asList(revisions));
+    }
+    history.sort(Comparator.comparingLong((JsonNode node) -> node.path("deviceId").asLong())
+        .thenComparingLong(node -> node.path("configurationVersion").asLong()));
     transaction.executeWithoutResult(
         status -> {
           var existing =
@@ -194,6 +212,17 @@ public class ReplicaProvisioning {
                 range.maximumHumidity(),
                 range.alertThresholdMinutes(),
                 now);
+          }
+          for (var revision : history) {
+            var event = json.createObjectNode();
+            String identity = "source-bootstrap:" + org + ":" + revision.path("deviceId").asLong()
+                + ":" + revision.path("configurationVersion").asLong();
+            event.put("eventId", UUID.nameUUIDFromBytes(identity.getBytes(java.nio.charset.StandardCharsets.UTF_8)).toString());
+            event.put("eventType", "source.configuration-changed");
+            event.put("version", 1);
+            event.put("organizationId", org);
+            event.set("payload", revision);
+            sourceConfigurations.accept(event);
           }
         });
     return snapshots.size();

@@ -104,6 +104,14 @@ public class SourceConfigurationConsumer {
         throw conflict("Event identity was reused with different content");
       return;
     }
+    var revision = jdbc.queryForList(
+        "SELECT payload FROM source_assignment_revisions WHERE iot_device_id=? AND configuration_version=?",
+        device, version);
+    if (!revision.isEmpty()) {
+      if (!decode(revision.getFirst().get("payload").toString()).equals(decode(payload.toString())))
+        throw conflict("Configuration revision was reused with different content");
+      return;
+    }
     var previous =
         jdbc.query(
             "SELECT configuration_version,source_id,profile_version,effective_at FROM"
