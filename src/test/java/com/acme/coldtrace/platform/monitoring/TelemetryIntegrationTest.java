@@ -38,6 +38,7 @@ public class TelemetryIntegrationTest {
   @Autowired JdbcTemplate jdbc;
   @Autowired PasswordEncoder passwords;
   @Autowired MockMvc mvc;
+  @Autowired org.springframework.transaction.PlatformTransactionManager transactions;
   @MockBean Clock clock;
   @MockBean LegacyIdentityClient identity;
 
@@ -220,6 +221,17 @@ public class TelemetryIntegrationTest {
     sourceConfigurations.accept(live);
     assertThat(jdbc.queryForObject("SELECT COUNT(*) FROM source_assignment_revisions", Long.class))
         .isEqualTo(2);
+  }
+
+  @Test
+  void invalidHistoryRollsBackEarlierRevisionsInTheRecoveryTransaction() {
+    var transaction = new org.springframework.transaction.support.TransactionTemplate(transactions);
+    assertThatThrownBy(() -> transaction.executeWithoutResult(status -> {
+      sourceConfigurations.accept(sourceConfiguration(1, "probe-a", NOW.minusSeconds(30)));
+      sourceConfigurations.accept(sourceConfiguration(3, "probe-c", NOW.minusSeconds(10)));
+    })).isInstanceOf(ResponseStatusException.class).hasMessageContaining("in order");
+    assertThat(jdbc.queryForObject("SELECT COUNT(*) FROM source_assignment_revisions", Long.class))
+        .isZero();
   }
 
   @Test

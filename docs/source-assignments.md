@@ -65,3 +65,13 @@ identity/tenant mismatches, invalid versions and timestamps, backwards effective
 time, rejection without writes, legacy-buffer compatibility and source replacement
 without breaking confirmed batch retries. Run against H2 or an isolated MySQL
 database using the existing `TEST_DB_*` environment configuration.
+
+## Source history recovery
+
+Authenticated provisioning fetches the complete source history before opening its
+local transaction. After provisioning gateway, device and range replicas, it applies
+revisions in configuration order through the existing consumer. A malformed history
+fails the transaction. No remote request runs inside telemetry ingestion.
+A deterministic bootstrap event identity makes repeated provisioning idempotent;
+a later live event carrying the identical revision is accepted without a second row.
+Reusing a revision with a different payload is rejected.
