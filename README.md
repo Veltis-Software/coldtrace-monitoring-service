@@ -18,6 +18,10 @@ Limits: 1–500 readings per batch, chronological order, nonnegative sequence
 numbers. User queries resolve organization through IAM and isolate all reads
 by that organization. Schema ownership: `ct_monitoring`; migrations: Flyway.
 
+Canonical source context is accepted alongside legacy readings. See
+[canonical readings](docs/canonical-readings.md) for all-or-none source metadata,
+accepted units/version, persistence, event context and retry compatibility.
+
 ## Configuration
 
 | Variable | Purpose / default |

@@ -53,6 +53,9 @@ public class TelemetryService {
           || r.recordedAt().isBefore(previous)
           || r.recordedAt().isAfter(now.plusSeconds(60)))
         throw new ResponseStatusException(HttpStatus.BAD_REQUEST, "Invalid or unordered reading");
+      if (!r.validSourceContext())
+        throw new ResponseStatusException(
+            HttpStatus.BAD_REQUEST, "Invalid canonical source context");
       if ((r.temperature() != null && !Double.isFinite(r.temperature()))
           || (r.humidity() != null
               && (!Double.isFinite(r.humidity()) || r.humidity() < 0 || r.humidity() > 100))
@@ -70,7 +73,8 @@ public class TelemetryService {
           idempotencyKey,
           HexFormat.of()
               .formatHex(
-                  MessageDigest.getInstance("SHA-256").digest(json.writeValueAsBytes(readings))),
+                  MessageDigest.getInstance("SHA-256")
+                      .digest(json.writeValueAsBytes(fingerprintReadings(readings)))),
           now);
     } catch (ResponseStatusException e) {
       throw e;
@@ -102,6 +106,13 @@ public class TelemetryService {
       payload.put("temperature", r.temperature());
       payload.put("humidity", r.humidity());
       payload.put("outOfRange", breached);
+      if (r.hasSourceContext()) {
+        payload.put("sourceId", r.sourceId());
+        payload.put("profileVersion", r.profileVersion());
+        payload.put("schemaVersion", r.schemaVersion());
+        payload.put("temperatureUnit", r.temperatureUnit());
+        payload.put("humidityUnit", r.humidityUnit());
+      }
       payload.put("safeMinTemperature", range.minimumTemperature());
       payload.put("safeMaxTemperature", range.maximumTemperature());
       payload.put("safeMinHumidity", range.minimumHumidity());
@@ -135,5 +146,30 @@ public class TelemetryService {
       throw new ResponseStatusException(HttpStatus.BAD_REQUEST, "Invalid heartbeat");
     var g = authenticate(gateway, key);
     store.heartbeat(g.id(), clock.instant(), pending);
+  }
+
+  // Keep the exact previous JSON field order and null fields for legacy retry hashes.
+  private List<Map<String, Object>> fingerprintReadings(List<Reading> readings) {
+    return readings.stream()
+        .map(
+            r -> {
+              Map<String, Object> value = new LinkedHashMap<>();
+              value.put("deviceUuid", r.deviceUuid());
+              value.put("sequenceNumber", r.sequenceNumber());
+              value.put("recordedAt", r.recordedAt());
+              value.put("temperature", r.temperature());
+              value.put("humidity", r.humidity());
+              value.put("batteryLevel", r.batteryLevel());
+              value.put("signalStrength", r.signalStrength());
+              if (r.hasSourceContext()) {
+                value.put("sourceId", r.sourceId());
+                value.put("profileVersion", r.profileVersion());
+                value.put("schemaVersion", r.schemaVersion());
+                value.put("temperatureUnit", r.temperatureUnit());
+                value.put("humidityUnit", r.humidityUnit());
+              }
+              return value;
+            })
+        .toList();
   }
 }

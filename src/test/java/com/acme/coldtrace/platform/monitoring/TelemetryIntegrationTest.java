@@ -80,6 +80,219 @@ public class TelemetryIntegrationTest {
     return new Reading(DEVICE, seq, at, temperature, 60.0, null, null);
   }
 
+  Reading canonical(
+      long sequence,
+      String source,
+      Integer profile,
+      Integer version,
+      String temperatureUnit,
+      String humidityUnit) {
+    return new Reading(
+        DEVICE,
+        sequence,
+        NOW,
+        4.0,
+        60.0,
+        null,
+        null,
+        source,
+        profile,
+        version,
+        temperatureUnit,
+        humidityUnit);
+  }
+
+  @Test
+  void twoNormalizedProfilesUseTheSameEvaluationForOneHundredReadingsEach() {
+    var secondDevice = UUID.fromString("33333333-3333-3333-3333-333333333333");
+    jdbc.update(
+        "INSERT INTO"
+            + " device_replica(iot_device_id,organization_id,uuid,asset_id,gateway_id,location_id,reading_frequency_seconds,updated_at)"
+            + " VALUES (2,1,?,2,1,1,10,?)",
+        secondDevice.toString(),
+        Timestamp.from(NOW));
+    jdbc.update(
+        "INSERT INTO"
+            + " safe_range_replica(asset_id,organization_id,minimum_temperature,maximum_temperature,minimum_humidity,maximum_humidity,alert_threshold_minutes,settings_version,updated_at)"
+            + " VALUES (2,1,2,8,40,80,0,1,?)",
+        Timestamp.from(NOW));
+    var readings = new ArrayList<Reading>();
+    for (int i = 0; i < 100; i++) {
+      double temperature = (i % 2 == 0) ? 4 : 12;
+      Instant at = NOW.minusSeconds(100 - i);
+      readings.add(
+          new Reading(
+              DEVICE, i + 1, at, temperature, 60.0, null, null, "mqtt-source", 1, 1, "C", "%RH"));
+      readings.add(
+          new Reading(
+              secondDevice,
+              i + 1,
+              at,
+              temperature,
+              60.0,
+              null,
+              null,
+              "http-source",
+              3,
+              1,
+              "C",
+              "%RH"));
+    }
+    assertThat(service.ingest(GATEWAY, UUID.randomUUID(), "local-key", readings, "two-profiles"))
+        .isEqualTo(new BatchResult(200, 0));
+    for (String source : List.of("mqtt-source", "http-source")) {
+      assertThat(
+              jdbc.queryForObject(
+                  "SELECT COUNT(*) FROM sensor_readings WHERE source_id=?", Long.class, source))
+          .isEqualTo(100);
+      assertThat(
+              jdbc.queryForObject(
+                  "SELECT COUNT(*) FROM sensor_readings WHERE source_id=? AND out_of_range=true",
+                  Long.class,
+                  source))
+          .isEqualTo(50);
+    }
+  }
+
+  @Test
+  void canonicalContextIsPersistedAndPublishedWithoutChangingRangeEvaluation() {
+    var reading = canonical(1, "camara-lacteos", 2, 1, "C", "%RH");
+    assertThat(
+            service.ingest(GATEWAY, UUID.randomUUID(), "local-key", List.of(reading), "canonical"))
+        .isEqualTo(new BatchResult(1, 0));
+    var row =
+        jdbc.queryForMap(
+            "SELECT"
+                + " source_id,profile_version,schema_version,temperature_unit,humidity_unit,out_of_range"
+                + " FROM sensor_readings");
+    assertThat(row.get("source_id")).isEqualTo("camara-lacteos");
+    assertThat(((Number) row.get("profile_version")).intValue()).isEqualTo(2);
+    assertThat(((Number) row.get("schema_version")).intValue()).isEqualTo(1);
+    assertThat(row.get("temperature_unit")).isEqualTo("C");
+    assertThat(row.get("humidity_unit")).isEqualTo("%RH");
+    assertThat(row.get("out_of_range")).isEqualTo(false);
+    assertThat(
+            jdbc.queryForObject(
+                "SELECT payload FROM outbox_events WHERE event_type='readings.ingested'",
+                String.class))
+        .contains("camara-lacteos", "profileVersion", "temperatureUnit");
+  }
+
+  @Test
+  void incompatibleCanonicalContextRejectsTheEntireBatchBeforeAnyWrite() {
+    var invalid =
+        List.of(
+            canonical(2, "camara", 1, 2, "C", "%RH"),
+            canonical(2, "camara", 1, 1, "F", "%RH"),
+            canonical(2, "camara", 1, 1, "C", "fraction"),
+            canonical(2, "camara", null, 1, "C", "%RH"),
+            canonical(2, "camara", 0, 1, "C", "%RH"),
+            canonical(2, "invalid source", 1, 1, "C", "%RH"),
+            canonical(2, null, 1, 1, "C", "%RH"));
+    for (var row : invalid) {
+      assertThatThrownBy(
+              () ->
+                  service.ingest(
+                      GATEWAY,
+                      UUID.randomUUID(),
+                      "local-key",
+                      List.of(reading(1, NOW, 4), row),
+                      "reject"))
+          .isInstanceOf(ResponseStatusException.class)
+          .hasMessageContaining("400");
+      assertThat(jdbc.queryForObject("SELECT COUNT(*) FROM sensor_readings", Long.class)).isZero();
+      assertThat(jdbc.queryForObject("SELECT COUNT(*) FROM telemetry_batches", Long.class))
+          .isZero();
+      assertThat(jdbc.queryForObject("SELECT COUNT(*) FROM outbox_events", Long.class)).isZero();
+    }
+  }
+
+  @Test
+  void canonicalContextIsPartOfTheStableBatchFingerprint() {
+    var key = UUID.randomUUID();
+    var row = canonical(1, "camara", 1, 1, "C", "%RH");
+    service.ingest(GATEWAY, key, "local-key", List.of(row), "first");
+    assertThat(service.ingest(GATEWAY, key, "local-key", List.of(row), "retry"))
+        .isEqualTo(new BatchResult(0, 1));
+    assertThatThrownBy(
+            () ->
+                service.ingest(
+                    GATEWAY,
+                    key,
+                    "local-key",
+                    List.of(canonical(1, "camara", 2, 1, "C", "%RH")),
+                    "changed"))
+        .isInstanceOf(ResponseStatusException.class)
+        .hasMessageContaining("409");
+  }
+
+  @Test
+  void legacyBatchFingerprintRemainsCompatibleWithThePreviousReadingRecord() throws Exception {
+    record LegacyReading(
+        UUID deviceUuid,
+        long sequenceNumber,
+        Instant recordedAt,
+        Double temperature,
+        Double humidity,
+        Integer batteryLevel,
+        Integer signalStrength) {}
+    var legacy = new LegacyReading(DEVICE, 1, NOW, 4.0, 60.0, null, null);
+    var expected =
+        java.util.HexFormat.of()
+            .formatHex(
+                java.security.MessageDigest.getInstance("SHA-256")
+                    .digest(json.writeValueAsBytes(List.of(legacy))));
+    service.ingest(GATEWAY, UUID.randomUUID(), "local-key", List.of(reading(1, NOW, 4)), "legacy");
+    assertThat(jdbc.queryForObject("SELECT payload_hash FROM telemetry_batches", String.class))
+        .isEqualTo(expected);
+    assertThat(jdbc.queryForObject("SELECT source_id FROM sensor_readings", String.class)).isNull();
+  }
+
+  @Test
+  void restEndpointAcceptsEdgeCanonicalFieldsAndRejectsUnsupportedUnits() throws Exception {
+    var row = new LinkedHashMap<String, Object>();
+    row.put("deviceUuid", DEVICE);
+    row.put("sequenceNumber", 1);
+    row.put("recordedAt", NOW);
+    row.put("temperature", 4);
+    row.put("humidity", 60);
+    row.put("sourceId", "camara");
+    row.put("profileVersion", 1);
+    row.put("schemaVersion", 1);
+    row.put("temperatureUnit", "C");
+    row.put("humidityUnit", "%RH");
+    var body = Map.of("gatewayUuid", GATEWAY, "readings", List.of(row));
+    mvc.perform(
+            post("/api/v1/telemetry/batches")
+                .contentType("application/json")
+                .header("X-Gateway-Key", "local-key")
+                .header("Idempotency-Key", UUID.randomUUID())
+                .content(json.writeValueAsBytes(body)))
+        .andExpect(status().isAccepted());
+    row.put("temperatureUnit", "F");
+    row.put("sequenceNumber", 2);
+    mvc.perform(
+            post("/api/v1/telemetry/batches")
+                .contentType("application/json")
+                .header("X-Gateway-Key", "local-key")
+                .header("Idempotency-Key", UUID.randomUUID())
+                .content(json.writeValueAsBytes(body)))
+        .andExpect(status().isBadRequest());
+    row.put("temperatureUnit", "C");
+    for (Object invalidVersion : List.of(1.5, "1", true, 2147483648L)) {
+      row.put("schemaVersion", invalidVersion);
+      mvc.perform(
+              post("/api/v1/telemetry/batches")
+                  .contentType("application/json")
+                  .header("X-Gateway-Key", "local-key")
+                  .header("Idempotency-Key", UUID.randomUUID())
+                  .content(json.writeValueAsBytes(body)))
+          .andExpect(status().isBadRequest());
+    }
+    assertThat(jdbc.queryForObject("SELECT COUNT(*) FROM sensor_readings", Long.class))
+        .isEqualTo(1);
+  }
+
   @Test
   void repeatedBatchHasNoDuplicateReadingsOrEvents() {
     var key = UUID.randomUUID();
@@ -291,6 +504,8 @@ public class TelemetryIntegrationTest {
         .isEqualTo("listAssetCurrentStates");
     assertThat(doc.at("/components/schemas/ReadingDto/required").toString())
         .contains("deviceUuid", "sequenceNumber", "recordedAt");
+    assertThat(doc.at("/components/schemas/ReadingDto/properties").toString())
+        .contains("sourceId", "profileVersion", "schemaVersion", "temperatureUnit", "humidityUnit");
     assertThat(doc.at("/components/securitySchemes/gatewayKey/name").asText())
         .isEqualTo("X-Gateway-Key");
     assertThat(doc.at("/components/schemas/TelemetryBatchResponse/properties").has("duplicated"))
