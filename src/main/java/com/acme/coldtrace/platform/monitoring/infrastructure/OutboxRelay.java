@@ -6,16 +6,17 @@ import java.util.*;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.springframework.beans.factory.annotation.Value;
-import org.springframework.boot.autoconfigure.condition.ConditionalOnProperty;
+import org.springframework.boot.autoconfigure.condition.ConditionalOnExpression;
 import org.springframework.jdbc.core.JdbcTemplate;
 import org.springframework.scheduling.annotation.Scheduled;
 import org.springframework.stereotype.Component;
 import org.springframework.transaction.annotation.Transactional;
 import org.springframework.web.client.RestClient;
 
-/** Local Pub/Sub adapter. Disabled unless an emulator is explicitly configured. */
+/** Publishes committed outbox entries through the configured Pub/Sub transport. */
 @Component
-@ConditionalOnProperty(name = "coldtrace.pubsub.emulator-host")
+@ConditionalOnExpression(
+    "${coldtrace.pubsub.cloud-enabled:false} or '${coldtrace.pubsub.emulator-host:}' != ''")
 public class OutboxRelay {
   private static final Logger LOG = LoggerFactory.getLogger(OutboxRelay.class);
   private final JdbcTemplate jdbc;
@@ -26,12 +27,15 @@ public class OutboxRelay {
   public OutboxRelay(
       JdbcTemplate jdbc,
       ObjectMapper json,
-      @Value("${coldtrace.pubsub.emulator-host}") String host,
+      @Value("${coldtrace.pubsub.emulator-host:}") String host,
+      @Value("${coldtrace.pubsub.cloud-enabled:false}") boolean cloud,
       @Value("${coldtrace.pubsub.project:coldtrace-local}") String project) {
     this.jdbc = jdbc;
     this.json = json;
     this.project = project;
-    if (host.isBlank() || host.contains("://") || host.contains("/"))
+    if (cloud && !host.isBlank())
+      throw new IllegalArgumentException("Choose one Pub/Sub transport");
+    if (!cloud && (host.isBlank() || host.contains("://") || host.contains("/")))
       throw new IllegalArgumentException("Expected emulator host:port");
     var factory =
         new org.springframework.http.client.JdkClientHttpRequestFactory(
@@ -39,7 +43,31 @@ public class OutboxRelay {
                 .connectTimeout(java.time.Duration.ofSeconds(2))
                 .build());
     factory.setReadTimeout(java.time.Duration.ofSeconds(3));
-    broker = RestClient.builder().baseUrl("http://" + host).requestFactory(factory).build();
+    var publisher = RestClient.builder().requestFactory(factory);
+    if (cloud) {
+      if (project.isBlank() || project.equals("coldtrace-local"))
+        throw new IllegalArgumentException("Cloud Pub/Sub requires a project");
+      var metadata = RestClient.builder()
+          .baseUrl("http://metadata.google.internal")
+          .requestFactory(factory)
+          .build();
+      publisher.baseUrl("https://pubsub.googleapis.com")
+          .requestInterceptor((request, body, execution) -> {
+            var credentials = metadata.get()
+                .uri("/computeMetadata/v1/instance/service-accounts/default/token")
+                .header("Metadata-Flavor", "Google")
+                .retrieve()
+                .body(Map.class);
+            if (credentials == null || !(credentials.get("access_token") instanceof String token)
+                || token.isBlank())
+              throw new IllegalStateException("Cloud Pub/Sub access token unavailable");
+            request.getHeaders().setBearerAuth(token);
+            return execution.execute(request, body);
+          });
+    } else {
+      publisher.baseUrl("http://" + host);
+    }
+    broker = publisher.build();
   }
 
   @Scheduled(
