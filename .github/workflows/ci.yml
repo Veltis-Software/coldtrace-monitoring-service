@@ -11,14 +11,14 @@ jobs:
         with: {path: service}
       - uses: actions/checkout@v4
         with:
-          repository: Veltis-Software/coldtrace-infrastructure
-          ref: 322854fb29afea699d6854cba4c9f836e2c8db62
-          path: infrastructure
+          repository: Veltis-Software/coldtrace-shared
+          ref: 3e791b547df753d0a091da67e60df51a87793abd
+          path: shared
       - uses: actions/setup-java@v4
         with: {distribution: temurin, java-version: '21', cache: maven, cache-dependency-path: '**/pom.xml'}
-      - run: mvn -B -f infrastructure/libraries/coldtrace-shared/pom.xml install
+      - run: mvn -B -f shared/pom.xml install
       - run: mvn -B -f service/pom.xml verify
-      - run: docker build --build-context shared=./infrastructure/libraries/coldtrace-shared -t coldtrace-monitoring-service:ci ./service
+      - run: docker build --build-context shared=./shared -t coldtrace-monitoring-service:ci ./service
       - uses: actions/upload-artifact@v4
         if: always()
         with: {name: test-results, path: service/target/surefire-reports}
