@@ -20,7 +20,8 @@ import org.springframework.web.server.ResponseStatusException;
 /** Explicit authenticated provisioning ACL. It is never called by telemetry ingestion. */
 @Service
 public class ReplicaProvisioning {
-  private final RestClient legacy;
+  private final RestClient assets;
+  private final RestClient identity;
   private final JdbcTemplate jdbc;
   private final PasswordEncoder passwords;
   private final TransactionTemplate transaction;
@@ -28,7 +29,8 @@ public class ReplicaProvisioning {
   private final ObjectMapper json;
 
   public ReplicaProvisioning(
-      @Value("${coldtrace.asset.url:${coldtrace.identity.url}}") String url,
+      @Value("${coldtrace.asset.url}") String assetUrl,
+      @Value("${coldtrace.identity.url}") String identityUrl,
       JdbcTemplate jdbc,
       PasswordEncoder passwords,
       PlatformTransactionManager manager,
@@ -38,7 +40,8 @@ public class ReplicaProvisioning {
         new org.springframework.http.client.JdkClientHttpRequestFactory(
             java.net.http.HttpClient.newBuilder().connectTimeout(Duration.ofSeconds(2)).build());
     factory.setReadTimeout(Duration.ofSeconds(5));
-    legacy = RestClient.builder().baseUrl(url).requestFactory(factory).build();
+    assets = RestClient.builder().baseUrl(assetUrl).requestFactory(factory).build();
+    identity = RestClient.builder().baseUrl(identityUrl).requestFactory(factory).build();
     this.jdbc = jdbc;
     this.passwords = passwords;
     transaction = new TransactionTemplate(manager);
@@ -70,13 +73,14 @@ public class ReplicaProvisioning {
   public record Snapshot(Device device, Asset asset, Range range, String locationName) {}
 
   private <T> T get(String bearer, String path, Class<T> type, Object... args) {
-    return legacy.get().uri(path, args).header("Authorization", bearer).retrieve().body(type);
+    return assets.get().uri(path, args).header("Authorization", bearer).retrieve().body(type);
   }
 
   public int synchronize(String bearer, long gatewayId, String key) {
     if (bearer == null || !bearer.startsWith("Bearer "))
       throw new ResponseStatusException(HttpStatus.UNAUTHORIZED);
-    var session = get(bearer, "/api/v1/session/context", IdentitySession.class);
+    var session = identity.get().uri("/api/v1/session/context")
+        .header("Authorization",bearer).retrieve().body(IdentitySession.class);
     if (session == null || !session.permits("assets:manage"))
       throw new ResponseStatusException(HttpStatus.FORBIDDEN);
     if (key == null || key.length() < 16 || key.length() > 72)
