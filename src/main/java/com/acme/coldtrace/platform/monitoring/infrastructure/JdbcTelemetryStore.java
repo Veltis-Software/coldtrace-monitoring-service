@@ -80,6 +80,19 @@ public class JdbcTelemetryStore implements TelemetryStore {
     return rows.isEmpty() ? null : rows.get(0);
   }
 
+  public List<com.acme.coldtrace.platform.monitoring.domain.SourceAssignment> sourceAssignments(
+      Device device) {
+    return jdbc.query(
+        "SELECT configuration_version,source_id,profile_version,effective_at FROM"
+            + " source_assignment_revisions WHERE organization_id=? AND iot_device_id=? ORDER BY"
+            + " configuration_version",
+        (rs, row) ->
+            new com.acme.coldtrace.platform.monitoring.domain.SourceAssignment(
+                rs.getLong(1), rs.getString(2), rs.getInt(3), instant(rs.getTimestamp(4))),
+        device.organizationId(),
+        device.id());
+  }
+
   public void claimBatch(long gatewayId, UUID key, String fingerprint, Instant now) {
     var hashes =
         jdbc.queryForList(

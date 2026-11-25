@@ -62,3 +62,7 @@ docker build --build-context shared=../coldtrace-infrastructure/libraries/coldtr
 
 The CI workflow installs the pinned shared source, runs tests, builds the image
 and uploads test reports. Local orchestration is in `coldtrace-infrastructure`.
+
+Source configuration events and capture-time validation use the local V9 revision
+history. See [source assignments](docs/source-assignments.md) for event ordering,
+buffered readings, source replacement and the local/cloud delivery boundary.

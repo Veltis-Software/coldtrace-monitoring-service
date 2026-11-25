@@ -9,6 +9,8 @@ public interface TelemetryStore {
 
   Device device(UUID uuid);
 
+  List<SourceAssignment> sourceAssignments(Device device);
+
   SafeRange range(long assetId, long organizationId);
 
   Map<String, Object> assetContext(long assetId, long organizationId);

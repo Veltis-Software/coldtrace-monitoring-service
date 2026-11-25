@@ -53,10 +53,11 @@ null values for legacy batches. Consequently a retry from a gateway running the
 previous increment keeps the same payload hash. Canonical fields participate in
 the fingerprint only when source context is supplied.
 
-Source association administration and profile-distribution authorization are
-separate Asset Management responsibilities. This service checks the supplied
-canonical context and the existing device/gateway ownership; it does not claim
-that the configured source has been verified against a distributed source registry.
+Source association administration and profile-distribution authorization remain
+Asset Management responsibilities. Monitoring projects its configuration events
+into a local revision history and checks the effective source/profile during
+ingestion. See [source assignments](source-assignments.md) for rollout, historical
+buffer compatibility and the boundary between emulator and cloud delivery.
 
 ## Verification
 
