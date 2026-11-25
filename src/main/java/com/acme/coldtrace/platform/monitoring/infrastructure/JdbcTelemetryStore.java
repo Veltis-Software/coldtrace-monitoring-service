@@ -80,6 +80,19 @@ public class JdbcTelemetryStore implements TelemetryStore {
     return rows.isEmpty() ? null : rows.get(0);
   }
 
+  public List<com.acme.coldtrace.platform.monitoring.domain.SourceAssignment> sourceAssignments(
+      Device device) {
+    return jdbc.query(
+        "SELECT configuration_version,source_id,profile_version,effective_at FROM"
+            + " source_assignment_revisions WHERE organization_id=? AND iot_device_id=? ORDER BY"
+            + " configuration_version",
+        (rs, row) ->
+            new com.acme.coldtrace.platform.monitoring.domain.SourceAssignment(
+                rs.getLong(1), rs.getString(2), rs.getInt(3), instant(rs.getTimestamp(4))),
+        device.organizationId(),
+        device.id());
+  }
+
   public void claimBatch(long gatewayId, UUID key, String fingerprint, Instant now) {
     var hashes =
         jdbc.queryForList(
@@ -133,8 +146,8 @@ public class JdbcTelemetryStore implements TelemetryStore {
           var s =
               connection.prepareStatement(
                   "INSERT INTO"
-                      + " sensor_readings(organization_id,asset_id,iot_device_id,gateway_id,location_id,sequence_number,temperature,humidity,out_of_range,recorded_at,battery_level,signal_strength,created_at,updated_at)"
-                      + " VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+                      + " sensor_readings(organization_id,asset_id,iot_device_id,gateway_id,location_id,sequence_number,temperature,humidity,out_of_range,recorded_at,battery_level,signal_strength,created_at,updated_at,source_id,profile_version,schema_version,temperature_unit,humidity_unit)"
+                      + " VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
                   Statement.RETURN_GENERATED_KEYS);
           Object[] values = {
             aggregate.getOrganizationId(),
@@ -150,7 +163,12 @@ public class JdbcTelemetryStore implements TelemetryStore {
             aggregate.getBatteryLevel(),
             aggregate.getSignalStrength(),
             ts(now),
-            ts(now)
+            ts(now),
+            r.sourceId(),
+            r.profileVersion(),
+            r.schemaVersion(),
+            r.temperatureUnit(),
+            r.humidityUnit()
           };
           for (int i = 0; i < values.length; i++) s.setObject(i + 1, values[i]);
           return s;

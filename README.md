@@ -18,6 +18,10 @@ Limits: 1–500 readings per batch, chronological order, nonnegative sequence
 numbers. User queries resolve organization through IAM and isolate all reads
 by that organization. Schema ownership: `ct_monitoring`; migrations: Flyway.
 
+Canonical source context is accepted alongside legacy readings. See
+[canonical readings](docs/canonical-readings.md) for all-or-none source metadata,
+accepted units/version, persistence, event context and retry compatibility.
+
 ## Configuration
 
 | Variable | Purpose / default |
@@ -58,3 +62,7 @@ docker build --build-context shared=../coldtrace-infrastructure/libraries/coldtr
 
 The CI workflow installs the pinned shared source, runs tests, builds the image
 and uploads test reports. Local orchestration is in `coldtrace-infrastructure`.
+
+Source configuration events and capture-time validation use the local V9 revision
+history. See [source assignments](docs/source-assignments.md) for event ordering,
+buffered readings, source replacement and the local/cloud delivery boundary.

@@ -41,7 +41,21 @@ public class TelemetryController {
       Double temperature,
       Double humidity,
       Integer batteryLevel,
-      Integer signalStrength) {
+      Integer signalStrength,
+      @Schema(
+              description =
+                  "Configured origin identifier; all source context fields must be supplied"
+                      + " together")
+          String sourceId,
+      @com.fasterxml.jackson.databind.annotation.JsonDeserialize(
+              using = ContractVersionDeserializer.class)
+          Integer profileVersion,
+      @Schema(description = "Canonical schema version; supported value is 1")
+          @com.fasterxml.jackson.databind.annotation.JsonDeserialize(
+              using = ContractVersionDeserializer.class)
+          Integer schemaVersion,
+      @Schema(description = "Canonical temperature unit C") String temperatureUnit,
+      @Schema(description = "Canonical relative humidity unit %RH") String humidityUnit) {
     Reading reading() {
       return new Reading(
           deviceUuid,
@@ -50,7 +64,12 @@ public class TelemetryController {
           temperature,
           humidity,
           batteryLevel,
-          signalStrength);
+          signalStrength,
+          sourceId,
+          profileVersion,
+          schemaVersion,
+          temperatureUnit,
+          humidityUnit);
     }
   }
 
