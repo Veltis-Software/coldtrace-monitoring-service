@@ -80,6 +80,19 @@ public class JdbcTelemetryStore implements TelemetryStore {
     return rows.isEmpty() ? null : rows.get(0);
   }
 
+  public List<com.acme.coldtrace.platform.monitoring.domain.SourceAssignment> sourceAssignments(
+      Device device) {
+    return jdbc.query(
+        "SELECT configuration_version,source_id,profile_version,effective_at FROM"
+            + " source_assignment_revisions WHERE organization_id=? AND iot_device_id=? ORDER BY"
+            + " configuration_version",
+        (rs, row) ->
+            new com.acme.coldtrace.platform.monitoring.domain.SourceAssignment(
+                rs.getLong(1), rs.getString(2), rs.getInt(3), instant(rs.getTimestamp(4))),
+        device.organizationId(),
+        device.id());
+  }
+
   public void claimBatch(long gatewayId, UUID key, String fingerprint, Instant now) {
     var hashes =
         jdbc.queryForList(
@@ -133,8 +146,8 @@ public class JdbcTelemetryStore implements TelemetryStore {
           var s =
               connection.prepareStatement(
                   "INSERT INTO"
-                      + " sensor_readings(organization_id,asset_id,iot_device_id,gateway_id,location_id,sequence_number,temperature,humidity,out_of_range,recorded_at,battery_level,signal_strength,created_at,updated_at)"
-                      + " VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+                      + " sensor_readings(organization_id,asset_id,iot_device_id,gateway_id,location_id,sequence_number,temperature,humidity,out_of_range,recorded_at,battery_level,signal_strength,created_at,updated_at,source_id,profile_version,schema_version,temperature_unit,humidity_unit)"
+                      + " VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
                   Statement.RETURN_GENERATED_KEYS);
           Object[] values = {
             aggregate.getOrganizationId(),
@@ -150,13 +163,61 @@ public class JdbcTelemetryStore implements TelemetryStore {
             aggregate.getBatteryLevel(),
             aggregate.getSignalStrength(),
             ts(now),
-            ts(now)
+            ts(now),
+            r.sourceId(),
+            r.profileVersion(),
+            r.schemaVersion(),
+            r.temperatureUnit(),
+            r.humidityUnit()
           };
           for (int i = 0; i < values.length; i++) s.setObject(i + 1, values[i]);
           return s;
         },
         holder);
     return Objects.requireNonNull(holder.getKey()).longValue();
+  }
+
+  public Map<String, Object> assetContext(long assetId, long organizationId) {
+    var rows =
+        jdbc.queryForList(
+            "SELECT name,location_name FROM asset_replica WHERE asset_id=? AND organization_id=?",
+            assetId,
+            organizationId);
+    var context = new LinkedHashMap<String, Object>();
+    if (!rows.isEmpty()) {
+      context.put("assetName", rows.get(0).get("name"));
+      context.put("locationName", rows.get(0).get("location_name"));
+    }
+    return context;
+  }
+
+  public boolean thresholdDue(
+      Device device, Reading reading, boolean breached, int toleranceMinutes) {
+    var rows =
+        jdbc.queryForList(
+            "SELECT * FROM threshold_windows WHERE iot_device_id=? FOR UPDATE", device.id());
+    if (!rows.isEmpty()
+        && reading.recordedAt().isBefore(SqlTimes.instant(rows.get(0).get("last_evaluated_at"))))
+      return false;
+    Instant first = rows.isEmpty() ? null : SqlTimes.instant(rows.get(0).get("first_breached_at"));
+    boolean notified = !rows.isEmpty() && Boolean.TRUE.equals(rows.get(0).get("notified"));
+    if (!breached) {
+      first = null;
+      notified = false;
+    } else if (first == null) first = reading.recordedAt();
+    boolean due =
+        breached
+            && !notified
+            && !reading.recordedAt().isBefore(first.plusSeconds(toleranceMinutes * 60L));
+    jdbc.update(
+        "INSERT INTO threshold_windows(iot_device_id,first_breached_at,last_evaluated_at,notified)"
+            + " VALUES (?,?,?,?) ON DUPLICATE KEY UPDATE"
+            + " first_breached_at=VALUES(first_breached_at),last_evaluated_at=VALUES(last_evaluated_at),notified=VALUES(notified)",
+        device.id(),
+        first == null ? null : ts(first),
+        ts(reading.recordedAt()),
+        notified || due);
+    return due;
   }
 
   public void project(
