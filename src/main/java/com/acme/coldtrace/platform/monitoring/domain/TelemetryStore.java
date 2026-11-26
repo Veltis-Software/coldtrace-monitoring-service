@@ -9,11 +9,17 @@ public interface TelemetryStore {
 
   Device device(UUID uuid);
 
+  List<SourceAssignment> sourceAssignments(Device device);
+
   SafeRange range(long assetId, long organizationId);
+
+  Map<String, Object> assetContext(long assetId, long organizationId);
 
   void claimBatch(long gatewayId, UUID key, String fingerprint, Instant now);
 
   boolean exists(Device device, Reading reading);
+
+  boolean thresholdDue(Device device, Reading reading, boolean breached, int toleranceMinutes);
 
   long insert(Device device, Reading reading, boolean outOfRange, Instant now);
 

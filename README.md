@@ -18,6 +18,10 @@ Limits: 1–500 readings per batch, chronological order, nonnegative sequence
 numbers. User queries resolve organization through IAM and isolate all reads
 by that organization. Schema ownership: `ct_monitoring`; migrations: Flyway.
 
+Canonical source context is accepted alongside legacy readings. See
+[canonical readings](docs/canonical-readings.md) for all-or-none source metadata,
+accepted units/version, persistence, event context and retry compatibility.
+
 ## Configuration
 
 | Variable | Purpose / default |
@@ -43,19 +47,22 @@ authenticated cloud publication is not yet implemented.
 
 ## Build and test
 
-Requires Java 21 and Maven. Install the shared library from tag
-`v0.1.0-sprint1` (`08ab5ee5321e3d7e5e4ec0b3c454a5f5da9bfcc3`) first:
+Requires Java 21 and Maven. Install the common library from the infrastructure repository first:
 
 ```sh
-mvn -B -f ../coldtrace-shared/pom.xml install
+mvn -B -f ../coldtrace-infrastructure/libraries/coldtrace-shared/pom.xml install
 mvn -B verify
 ```
 
 Build the standalone image with the sibling library as a named build context:
 
 ```sh
-docker build --build-context shared=../coldtrace-shared -t coldtrace-monitoring-service:dev .
+docker build --build-context shared=../coldtrace-infrastructure/libraries/coldtrace-shared -t coldtrace-monitoring-service:dev .
 ```
 
 The CI workflow installs the pinned shared source, runs tests, builds the image
 and uploads test reports. Local orchestration is in `coldtrace-infrastructure`.
+
+Source configuration events and capture-time validation use the local V9 revision
+history. See [source assignments](docs/source-assignments.md) for event ordering,
+buffered readings, source replacement and the local/cloud delivery boundary.

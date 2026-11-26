@@ -53,7 +53,7 @@ class OutboxRelayTest {
     try {
       var relay =
           new OutboxRelay(
-              jdbc, json, "127.0.0.1:" + server.getAddress().getPort(), "coldtrace-local");
+              jdbc, json, "127.0.0.1:" + server.getAddress().getPort(), false, "coldtrace-local");
       relay.publishPending();
       assertThat(
               jdbc.queryForObject(

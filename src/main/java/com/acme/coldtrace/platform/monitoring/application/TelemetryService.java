@@ -44,6 +44,7 @@ public class TelemetryService {
     if (readings.size() > 500)
       throw new ResponseStatusException(HttpStatus.PAYLOAD_TOO_LARGE, "Maximum 500 readings");
     var devices = new ArrayList<Device>();
+    var sourceHistory = new HashMap<Long, List<SourceAssignment>>();
     Instant previous = Instant.MIN;
     for (var r : readings) {
       if (r == null
@@ -53,6 +54,9 @@ public class TelemetryService {
           || r.recordedAt().isBefore(previous)
           || r.recordedAt().isAfter(now.plusSeconds(60)))
         throw new ResponseStatusException(HttpStatus.BAD_REQUEST, "Invalid or unordered reading");
+      if (!r.validSourceContext())
+        throw new ResponseStatusException(
+            HttpStatus.BAD_REQUEST, "Invalid canonical source context");
       if ((r.temperature() != null && !Double.isFinite(r.temperature()))
           || (r.humidity() != null
               && (!Double.isFinite(r.humidity()) || r.humidity() < 0 || r.humidity() > 100))
@@ -62,6 +66,23 @@ public class TelemetryService {
       var d = store.device(r.deviceUuid());
       if (d == null || d.gatewayId() != g.id() || d.organizationId() != g.organizationId())
         throw new ResponseStatusException(HttpStatus.BAD_REQUEST, "Device not owned by gateway");
+      // Historical retries and migration-era buffered readings keep their original meaning.
+      if (!store.exists(d, r)) {
+        var history = sourceHistory.computeIfAbsent(d.id(), ignored -> store.sourceAssignments(d));
+        if (!history.isEmpty() && !r.recordedAt().isBefore(history.getFirst().effectiveAt())) {
+          var effective = history.getFirst();
+          for (var assignment : history) {
+            if (assignment.effectiveAt().isAfter(r.recordedAt())) break;
+            effective = assignment;
+          }
+          if (!r.hasSourceContext()
+              || !effective.sourceId().equals(r.sourceId())
+              || effective.profileVersion() != r.profileVersion()) {
+            throw new ResponseStatusException(
+                HttpStatus.CONFLICT, "Reading source does not match its effective configuration");
+          }
+        }
+      }
       devices.add(d);
     }
     try {
@@ -70,7 +91,8 @@ public class TelemetryService {
           idempotencyKey,
           HexFormat.of()
               .formatHex(
-                  MessageDigest.getInstance("SHA-256").digest(json.writeValueAsBytes(readings))),
+                  MessageDigest.getInstance("SHA-256")
+                      .digest(json.writeValueAsBytes(fingerprintReadings(readings)))),
           now);
     } catch (ResponseStatusException e) {
       throw e;
@@ -94,6 +116,7 @@ public class TelemetryService {
       store.project(d, r, id, breached, now, correlation);
       accepted++;
       var payload = new LinkedHashMap<String, Object>();
+      payload.putAll(store.assetContext(d.assetId(), d.organizationId()));
       payload.put("readingId", id);
       payload.put("assetId", d.assetId());
       payload.put("iotDeviceId", d.id());
@@ -101,10 +124,21 @@ public class TelemetryService {
       payload.put("temperature", r.temperature());
       payload.put("humidity", r.humidity());
       payload.put("outOfRange", breached);
+      if (r.hasSourceContext()) {
+        payload.put("sourceId", r.sourceId());
+        payload.put("profileVersion", r.profileVersion());
+        payload.put("schemaVersion", r.schemaVersion());
+        payload.put("temperatureUnit", r.temperatureUnit());
+        payload.put("humidityUnit", r.humidityUnit());
+      }
+      payload.put("safeMinTemperature", range.minimumTemperature());
+      payload.put("safeMaxTemperature", range.maximumTemperature());
+      payload.put("safeMinHumidity", range.minimumHumidity());
+      payload.put("safeMaxHumidity", range.maximumHumidity());
       ingested.add(payload);
-      if (breached) {
+      if (store.thresholdDue(d, r, breached, range.toleranceMinutes())) {
         var threshold = new LinkedHashMap<>(payload);
-        threshold.put("severity", "WARNING");
+        threshold.put("severity", "CRITICAL");
         threshold.put("safeMinTemperature", range.minimumTemperature());
         threshold.put("safeMaxTemperature", range.maximumTemperature());
         threshold.put("safeMinHumidity", range.minimumHumidity());
@@ -130,5 +164,30 @@ public class TelemetryService {
       throw new ResponseStatusException(HttpStatus.BAD_REQUEST, "Invalid heartbeat");
     var g = authenticate(gateway, key);
     store.heartbeat(g.id(), clock.instant(), pending);
+  }
+
+  // Keep the exact previous JSON field order and null fields for legacy retry hashes.
+  private List<Map<String, Object>> fingerprintReadings(List<Reading> readings) {
+    return readings.stream()
+        .map(
+            r -> {
+              Map<String, Object> value = new LinkedHashMap<>();
+              value.put("deviceUuid", r.deviceUuid());
+              value.put("sequenceNumber", r.sequenceNumber());
+              value.put("recordedAt", r.recordedAt());
+              value.put("temperature", r.temperature());
+              value.put("humidity", r.humidity());
+              value.put("batteryLevel", r.batteryLevel());
+              value.put("signalStrength", r.signalStrength());
+              if (r.hasSourceContext()) {
+                value.put("sourceId", r.sourceId());
+                value.put("profileVersion", r.profileVersion());
+                value.put("schemaVersion", r.schemaVersion());
+                value.put("temperatureUnit", r.temperatureUnit());
+                value.put("humidityUnit", r.humidityUnit());
+              }
+              return value;
+            })
+        .toList();
   }
 }

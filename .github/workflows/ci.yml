@@ -12,7 +12,7 @@ jobs:
       - uses: actions/checkout@v4
         with:
           repository: Veltis-Software/coldtrace-shared
-          ref: 08ab5ee5321e3d7e5e4ec0b3c454a5f5da9bfcc3
+          ref: 3e791b547df753d0a091da67e60df51a87793abd
           path: shared
       - uses: actions/setup-java@v4
         with: {distribution: temurin, java-version: '21', cache: maven, cache-dependency-path: '**/pom.xml'}
